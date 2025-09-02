@@ -1,4 +1,5 @@
 <template>
+      <SendMessage />
   <div>
       <div id="logo">
         <img :src="'./logo.png'" />
@@ -20,12 +21,14 @@
 import CreateItem from './components/CreateItem'
 import GetItems from './components/GetItems'
 import GetItemById from './components/GetItemById'
+import SendMessage from './components/SendMessage.vue'
 export default {
   name: 'App',
   components: {
     GetItems,
     CreateItem,
     GetItemById,
+    SendMessage 
   },
 }
 </script>
