@@ -1,247 +1,198 @@
-AWSTemplateFormatVersion: 2010-09-09
-Description: >-
-  message-router
-Transform:
-- AWS::Serverless-2016-10-31
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SAM App: SNS -> Lambda -> DynamoDB -> Lambda -> S3
 
-# Resources declares the AWS resources that you want to include in the stack
-# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/resources-section-structure.html
+Globals:
+  Function:
+    Timeout: 10
+    Runtime: python3.12
+
 Resources:
-  # Each Lambda function is defined by properties:
-  # https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
 
-  # This is an API gateway associated with the getByIdFunction and putItemFunctions
-  ApiGatewayApi:
+  # --- API Gateway con CORS ---
+  MessageApi:
     Type: AWS::Serverless::Api
     Properties:
       StageName: Prod
       Cors:
-        AllowMethods: "'OPTIONS, POST, GET'"
-        AllowHeaders: "'Content-Type'"
-        AllowOrigin: "'*'" #DO NOT USE THIS VALUE IN PRODUCTION - https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-cors.html
+        AllowMethods: "'OPTIONS,POST'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"   # Para pruebas locales, puedes restringir luego a tu dominio
 
-  # This is a Lambda function config associated with the source code: get-by-id.js
-  getAllItemsFunction:
+  # --- Lambda que expone API Gateway ---
+  ApiFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: backend/
-      Handler: src/handlers/get-all-items.getAllItemsHandler
-      Runtime: nodejs22.x
-      Architectures:
-      - x86_64
-      MemorySize: 128
-      Timeout: 100
-      Description: A simple example includes a HTTP get method to get all items 
-        by id from a DynamoDB table.
-      Policies:
-        # Give Create/Read/Update/Delete Permissions to the SampleTable
-      - DynamoDBCrudPolicy:
-          TableName: !Ref SampleTable
+      CodeUri: backend/src/handlers/message_router_queue/
+      Handler: app.lambda_handler
       Environment:
         Variables:
-          # Make table name accessible as environment variable from function code during execution
-          SAMPLE_TABLE: !Ref SampleTable
-          # Make DynamoDB endpoint accessible as environment variable from function code during execution
-          ENDPOINT_OVERRIDE: ''
+          QUEUE_URL: !Ref MessageQueue
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt MessageQueue.QueueName
       Events:
-        Api:
+        ApiPost:
           Type: Api
           Properties:
-            Path: /
-            Method: GET
-            RestApiId:
-              Ref: ApiGatewayApi
-  # Each Lambda function is defined by properties:
-  # https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+            Path: /send
+            Method: post
+            RestApiId: !Ref MessageApi   # <-- Asociamos Lambda a API con CORS
 
-  # This is a Lambda function config associated with the source code: get-by-id.js
-  getByIdFunction:
+  # --- SQS Queue ---
+  MessageQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: MyMessageQueue
+
+  # --- Lambda Dispatcher: SQS -> EventBridge ---
+  LambdaDispatcher:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: backend/
-      Handler: src/handlers/get-by-id.getByIdHandler
-      Runtime: nodejs22.x
-      Architectures:
-      - x86_64
-      MemorySize: 128
-      Timeout: 100
-      Description: A simple example includes a HTTP get method to get one item 
-        by id from a DynamoDB table.
+      CodeUri: backend/src/handlers/lambda_dispatcher/
+      Handler: app.lambda_handler
+      Runtime: python3.12
       Policies:
-        # Give Create/Read/Update/Delete Permissions to the SampleTable
-      - DynamoDBCrudPolicy:
-          TableName: !Ref SampleTable
-      Environment:
-        Variables:
-          # Make table name accessible as environment variable from function code during execution
-          SAMPLE_TABLE: !Ref SampleTable
-          # Make DynamoDB endpoint accessible as environment variable from function code during execution
-          ENDPOINT_OVERRIDE: ''
+        - SQSPollerPolicy:
+            QueueName: !GetAtt MessageQueue.QueueName
+        - Statement:
+            Effect: Allow
+            Action:
+              - events:PutEvents
+            Resource: "*"
       Events:
-        Api:
-          Type: Api
+        SQSTrigger:
+          Type: SQS
           Properties:
-            Path: /{id}
-            Method: GET
-            RestApiId:
-              Ref: ApiGatewayApi
-  # Each Lambda function is defined by properties:
-  # https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+            Queue: !GetAtt MessageQueue.Arn
+            BatchSize: 1
 
-  # This is a Lambda function config associated with the source code: put-item.js
-  putItemFunction:
-    Type: AWS::Serverless::Function
+  # --- EventBridge Rule 1 -> SNS ---
+  EventRuleToSNS:
+    Type: AWS::Events::Rule
     Properties:
-      CodeUri: backend/
-      Handler: src/handlers/put-item.putItemHandler
-      Runtime: nodejs22.x
-      Architectures:
-      - x86_64
-      MemorySize: 128
-      Timeout: 100
-      Description: A simple example includes a HTTP post method to add one item 
-        to a DynamoDB table.
-      Policies:
-        # Give Create/Read/Update/Delete Permissions to the SampleTable
-      - DynamoDBCrudPolicy:
-          TableName: !Ref SampleTable
-      Environment:
-        Variables:
-          SAMPLE_TABLE: !Ref SampleTable
-          # Make DynamoDB endpoint accessible as environment variable from function code during execution
-          ENDPOINT_OVERRIDE: ''
-      Events:
-        Api:
-          Type: Api
-          Properties:
-            Path: /
-            Method: POST
-            RestApiId:
-              Ref: ApiGatewayApi
-  # Simple syntax to create a DynamoDB table with a single attribute primary key, more in
-  # https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlesssimpletable
+      Name: SendToSNSRule
+      Description: "Regla de EventBridge que publica en SNS"
+      EventPattern:
+        source:
+          - "MyApp"
+          - "my.custom.source"
+        detail-type:
+          - "PlainText"
+          - "MyEvent"
+      Targets:
+        - Arn: !Ref MySNSTopic
+          Id: "SnsTarget"
 
-  # DynamoDB table to store item: {id: &lt;ID&gt;, name: &lt;NAME&gt;}
-  SampleTable:
-    Type: AWS::Serverless::SimpleTable
+  # Policy that allows EventBridge to publish in SNS
+  EventBridgeToSNSPolicy:
+    Type: AWS::SNS::TopicPolicy
     Properties:
-      PrimaryKey:
-        Name: id
-        Type: String
-      ProvisionedThroughput:
-        ReadCapacityUnits: 2
-        WriteCapacityUnits: 2
-
-  # S3 Bucket to host single page app website
-  WebSiteBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-        - BucketKeyEnabled: true
-      VersioningConfiguration:
-        Status: Enabled
-  WebSiteBucketPolicy:
-    Type: AWS::S3::BucketPolicy
-    Properties:
-      Bucket: !Ref WebSiteBucket
+      Topics:
+        - !Ref MySNSTopic
       PolicyDocument:
-        Version: '2012-10-17'
-        Id: PolicyForCloudFrontPrivateContent
+        Version: "2012-10-17"
         Statement:
-        - Sid: AllowCloudFrontServicePrincipal
-          Effect: Allow
-          Principal:
-            Service: cloudfront.amazonaws.com
-          Action: s3:GetObject
-          Resource: !Join ['', ['arn:aws:s3:::', !Ref WebSiteBucket, /*]]
-          Condition:
-            StringEquals:
-              AWS:SourceArn: !Join ['', ['arn:aws:cloudfront::', !Ref "AWS::AccountId",
-                  :distribution/, !Ref CloudFrontDistribution]]
-  # CloudFront Distribution for hosting the single page app website
-  CloudFrontDistribution:
-    Type: AWS::CloudFront::Distribution
+          - Sid: AllowEventBridgeToPublish
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref MySNSTopic
+
+  # --- SNS Topic ---
+  MySNSTopic:
+    Type: AWS::SNS::Topic
     Properties:
-      DistributionConfig:
-        Origins:
-        - DomainName: !GetAtt WebSiteBucket.RegionalDomainName
-          Id: myS3Origin
-          OriginAccessControlId: !GetAtt CloudFrontOriginAccessControl.Id
-          S3OriginConfig:
-            OriginAccessIdentity: ''
-        Enabled: true
-        DefaultRootObject: index.html
-        HttpVersion: http2
-        DefaultCacheBehavior:
-          AllowedMethods:
-          - DELETE
-          - GET
-          - HEAD
-          - OPTIONS
-          - PATCH
-          - POST
-          - PUT
-          CachedMethods:
-          - GET
-          - HEAD
-          TargetOriginId: myS3Origin
-          ForwardedValues:
-            QueryString: false
-            Cookies:
-              Forward: none
-          ViewerProtocolPolicy: allow-all
-          MinTTL: 0
-          DefaultTTL: 3600
-          MaxTTL: 86400
-        PriceClass: PriceClass_200
-        Restrictions:
-          GeoRestriction:
-            RestrictionType: whitelist
-            Locations:
-            - US
-            - CA
-            - GB
-            - DE
-        ViewerCertificate:
-          CloudFrontDefaultCertificate: true
-  CloudFrontOriginAccessControl:
-    Type: AWS::CloudFront::OriginAccessControl
+      TopicName: MyTargetTopic
+
+  # Permissions for SNS to invoke Lambda
+  PermissionForSNSInvokeLambda:
+    Type: AWS::Lambda::Permission
     Properties:
-      OriginAccessControlConfig:
-        Name: !Sub "${WebSiteBucket} OAC"
-        OriginAccessControlOriginType: s3
-        SigningBehavior: always
-        SigningProtocol: sigv4
-  ApplicationResourceGroup:
-    Type: AWS::ResourceGroups::Group
+      FunctionName: !Ref DynamoLambda
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref MySNSTopic
+
+  # SNS subscription to Lambda
+  DynamoLambdaSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: PermissionForSNSInvokeLambda
     Properties:
-      Name:
-        Fn::Sub: ApplicationInsights-SAM-${AWS::StackName}
-      ResourceQuery:
-        Type: CLOUDFORMATION_STACK_1_0
-  ApplicationInsightsMonitoring:
-    Type: AWS::ApplicationInsights::Application
+      Protocol: lambda
+      Endpoint: !GetAtt DynamoLambda.Arn
+      TopicArn: !Ref MySNSTopic
+
+  # --- Lambda Dynamo: SNS -> DynamoDB ---
+  DynamoLambda:
+    Type: AWS::Serverless::Function
     Properties:
-      ResourceGroupName:
-        Ref: ApplicationResourceGroup
-      AutoConfigurationEnabled: 'true'
+      CodeUri: backend/src/handlers/lambda_dynamo/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref MessagesTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MessagesTable
+
+  # --- DynamoDB ---
+  MessagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: MessagesTable
+      AttributeDefinitions:
+        - AttributeName: MessageId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: MessageId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  # --- Lambda DDB to S3: DynamoDB -> S3 ---
+  DdbToS3Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-DdbToS3Handler'
+      Handler: app.lambda_handler
+      CodeUri: backend/src/handlers/lambda_ddb_to_s3/   
+      Timeout: 30      
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref TargetBucket
+      Events:
+        DdbStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt MessagesTable.StreamArn
+            BatchSize: 1
+            StartingPosition: LATEST 
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref MessagesTable
+        - S3WritePolicy:
+            BucketName: !Ref TargetBucket
+
+  # --- S3 Bucket ---
+  TargetBucket:
+    Type: AWS::S3::Bucket
+
+
 Outputs:
-  APIGatewayEndpoint:
-    Description: API Gateway endpoint URL for Prod stage
-    Value: !Sub "https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
-  CloudFrontDistributionId:
-    Description: CloudFront Distribution ID for hosting web front end
-    Value: !Ref CloudFrontDistribution
-  CloudFrontDistributionDomainName:
-    Description: CloudFront Distribution Domain Name for accessing web front end
-    Value: !GetAtt CloudFrontDistribution.DomainName
-  WebS3BucketName:
-    Description: S3 Bucket for hosting web frontend
-    Value: !Ref WebSiteBucket
-# # More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
-Globals:
-  Function:
-    Tracing: Active
-  Api:
-    TracingEnabled: true
+  ApiUrl:
+    Description: "API Gateway endpoint"
+    Value: !Sub "https://${MessageApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/send"
+  SNSTopicArn:
+    Description: "SNS Topic ARN"
+    Value: !Ref MySNSTopic
+  DynamoDBTableName:
+    Description: "DynamoDB Table Name"
+    Value: !Ref MessagesTable
+  BucketName:
+    Description: "Name of the S3 bucket"
+    Value: !Ref TargetBucket
