@@ -1,24 +1,30 @@
 <template>
-  <div class="flex flex-col items-center justify-center min-h-screen bg-gray-100">
-    <div class="w-full max-w-md bg-white p-6 rounded-2xl shadow-lg">
-      <h2 class="text-xl font-bold mb-4 text-center text-blue-600">Enviar Mensaje</h2>
-      <input
-        v-model="message"
-        type="text"
-        placeholder="Escribe tu mensaje..."
-        class="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
-      />
-      <button
-        @click="sendMessage"
-        class="w-full mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition"
-      >
-        Enviar
-      </button>
-      <p v-if="response" class="mt-4 text-green-600 font-medium">{{ response }}</p>
-      <p v-if="error" class="mt-4 text-red-600 font-medium">{{ error }}</p>
+  <div class="d-flex flex-column align-items-center justify-content-center min-vh-100 bg-light">
+    <div class="w-100" style="max-width: 28rem;">
+      <div class="card shadow-lg rounded-4 p-4">
+        <h2 class="h4 fw-bold mb-4 text-center text-primary">Message Router</h2>
+        
+        <input
+          v-model="message"
+          type="text"
+          placeholder="Write your message..."
+          class="form-control mb-3"
+        />
+
+        <button
+          @click="sendMessage"
+          class="btn btn-primary w-100"
+        >
+          Send
+        </button>
+
+        <p v-if="response" class="mt-3 text-success fw-semibold">{{ response }}</p>
+        <p v-if="error" class="mt-3 text-danger fw-semibold">{{ error }}</p>
+      </div>
     </div>
   </div>
 </template>
+
 
 <script>
 import axios from "axios";
@@ -37,14 +43,15 @@ export default {
       this.response = null;
       this.error = null;
       try {
+        const mensaje = this.message; // guardar antes de limpiar
         const res = await axios.post(
           process.env.VUE_APP_API_URL,
           { message: this.message }
         );
-        this.response = "Mensaje enviado correctamente"+ JSON.stringify(res.data);
+        this.response = `Message: "${mensaje}" - State: ${res.data.status}`;
         this.message = "";
       } catch (err) {
-        this.error = "Error al enviar mensaje"
+        this.error = "Something unexpected happened during the process.";
         console.log(err);
       }
     },
